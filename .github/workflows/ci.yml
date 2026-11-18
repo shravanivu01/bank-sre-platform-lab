@@ -1,0 +1,58 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+jobs:
+  build-scan-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint shell scripts
+        run: shellcheck scripts/*.sh
+
+      - name: Build image
+        run: docker build -t balance-service:${{ github.sha }} .
+
+      - name: Security scan with Trivy (fail on critical vulnerabilities)
+        # Trivy runs from a pinned image version, so the scanner itself is a known version.
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.56.2 image --severity CRITICAL --ignore-unfixed --exit-code 1 \
+            balance-service:${{ github.sha }}
+
+      - name: Smoke test
+        run: |
+          docker run -d --name balance -p 8080:80 balance-service:${{ github.sha }}
+          sleep 3
+          bash scripts/health_check.sh http://localhost:8080/health.json
+
+      - name: Publish image to GitHub Container Registry
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          IMAGE=ghcr.io/$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')/balance-service
+          docker tag balance-service:${{ github.sha }} $IMAGE:${{ github.sha }}
+          docker tag balance-service:${{ github.sha }} $IMAGE:latest
+          docker push $IMAGE:${{ github.sha }}
+          docker push $IMAGE:latest
+
+  windows-check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: PowerShell script syntax check
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($f in Get-ChildItem scripts/*.ps1) {
+            $tokens = $null; $errors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$errors)
+            if ($errors) { $errors; $failed = $true } else { "$($f.Name) parses cleanly" }
+          }
+          if ($failed) { exit 1 }

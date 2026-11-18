@@ -1,0 +1,101 @@
+- name: Baseline hardening for a DemoBank Linux host
+  hosts: bank_hosts
+  become: true
+  vars:
+    ops_user: opsadmin
+    # WSL has limits (for example auditd cannot run), so a few tasks skip there.
+    in_wsl: "{{ 'microsoft' in (ansible_kernel | lower) }}"
+  tasks:
+    - name: Apply all security updates
+      ansible.builtin.apt:
+        update_cache: true
+        upgrade: safe
+
+    - name: Install baseline packages
+      ansible.builtin.apt:
+        name: [ufw, fail2ban, unattended-upgrades, nginx, auditd, openssh-server]
+        state: present
+
+    - name: Turn on automatic security updates
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        mode: "0644"
+        content: |
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+
+    - name: Create a named ops admin account (no shared root)
+      ansible.builtin.user:
+        name: "{{ ops_user }}"
+        groups: sudo
+        append: true
+        shell: /bin/bash
+
+    - name: SSH - no root login
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin no'
+      notify: Restart ssh
+
+    - name: SSH - keys only, no passwords
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+      notify: Restart ssh
+
+    - name: Login banner
+      ansible.builtin.copy:
+        dest: /etc/issue.net
+        mode: "0644"
+        content: "Authorised users only. Activity is logged.\n"
+
+    - name: Firewall - allow SSH and HTTP only
+      community.general.ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop: ["22", "80"]
+
+    - name: Firewall - deny everything else inbound, then enable
+      community.general.ufw:
+        state: enabled
+        policy: deny
+        direction: incoming
+
+    - name: nginx front end proxies to the balance service
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/default
+        mode: "0644"
+        content: |
+          server {
+            listen 80 default_server;
+            access_log /var/log/nginx/access.log;
+            location / { proxy_pass http://127.0.0.1:8080; }
+          }
+      notify: Reload nginx
+
+    - name: Make sure nginx is running and starts on boot
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: true
+
+    - name: Make sure auditd is running (skipped in WSL, which has no kernel audit)
+      ansible.builtin.service:
+        name: auditd
+        state: started
+        enabled: true
+      when: not in_wsl
+
+  handlers:
+    - name: Restart ssh
+      ansible.builtin.service:
+        name: ssh
+        state: restarted
+      ignore_errors: true
+    - name: Reload nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded

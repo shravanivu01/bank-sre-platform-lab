@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: balance-service
+  labels: { app: balance-service }
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector:
+    matchLabels: { app: balance-service }
+  template:
+    metadata:
+      labels: { app: balance-service }
+    spec:
+      containers:
+        - name: balance-service
+          image: ghcr.io/shravanivu01/balance-service:latest
+          ports: [{ containerPort: 80 }]
+          resources:
+            requests: { cpu: "50m", memory: "32Mi" }
+            limits: { cpu: "200m", memory: "128Mi" }
+          readinessProbe:
+            httpGet: { path: /health.json, port: 80 }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health.json, port: 80 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: balance-service
+spec:
+  selector: { app: balance-service }
+  ports: [{ port: 80, targetPort: 80 }]
